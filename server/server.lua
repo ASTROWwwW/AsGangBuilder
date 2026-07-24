@@ -1,204 +1,244 @@
-RegisterServerEvent("as_gangbuilder:createGang")
-AddEventHandler("as_gangbuilder:createGang", function(data)
+local function sanitizeGrades(grades)
+    if type(grades) ~= 'table' then return nil, 'liste invalide' end
+
+    local cleaned, usedLevels, usedNames = {}, {}, {}
+    local bossLevel = nil
+
+    for _, grade in ipairs(grades) do
+        if type(grade) ~= 'table' then return nil, 'grade invalide' end
+
+        local name = SanitizeJobName(grade.name)
+        local label = SanitizeLabel(grade.label)
+        local level = tonumber(grade.grade)
+
+        if not name or not label or not IsFiniteNumber(level) then return nil, 'grade invalide' end
+
+        level = math.floor(level)
+        if level < 0 or level > Config.MaxGradeLevel then return nil, 'niveau invalide' end
+        if usedLevels[level] or usedNames[name] then return nil, 'doublon de grade' end
+
+        usedLevels[level] = true
+        usedNames[name] = true
+        cleaned[#cleaned + 1] = { name = name, label = label, grade = level }
+
+        if name == Config.BossGradeName then
+            bossLevel = level
+        end
+    end
+
+    if not bossLevel then return nil, 'grade boss manquant' end
+    if #cleaned < 2 then return nil, 'ajoute au moins un grade non-boss' end
+
+    for _, grade in ipairs(cleaned) do
+        if grade.grade > bossLevel then return nil, 'le boss doit avoir le grade le plus haut' end
+    end
+
+    return cleaned
+end
+
+RegisterNetEvent('as_gangbuilder:createGang', function(data)
     local src = source
-    local posCoffre = json.encode({x = data.posCoffre.x, y = data.posCoffre.y, z = data.posCoffre.z})
-    local posBoss = json.encode({x = data.posBoss.x, y = data.posBoss.y, z = data.posBoss.z})
 
-    -- Flag pour vérifier la fin des opérations
-    local operationsCompleted = {
-        gang = false,
-        job = false,
-        grades = false
-    }
+    if not IsGangAdmin(src) then
+        Notify(src, '~r~Accès refusé.')
+        return
+    end
 
-    local  function checkAllCompleted()
-            if operationsCompleted.gang and operationsCompleted.job and operationsCompleted.grades then
-                print("[GANG BUILDER] Gang '" .. data.name .. "' enregistré avec succès.")
-                TriggerClientEvent("esx:showNotification", src, "~g~Gang '" .. data.label .. "' enregistré avec succès.")
-                TriggerEvent('esx_society:registerSociety', data.name, data.label, 'society_' .. data.name, 'society', 'society', {})
+    if type(data) ~= 'table' then return end
 
+    local name = SanitizeJobName(data.name)
+    local label = SanitizeLabel(data.label)
+    local posCoffre = SanitizeCoords(data.posCoffre)
+    local posBoss = SanitizeCoords(data.posBoss)
+
+    if not name or not label or not posCoffre or not posBoss or name == Config.UnemployedJob then
+        Notify(src, '~r~Données du gang invalides.')
+        return
+    end
+
+    local grades, gradeError = sanitizeGrades(data.grades)
+    if not grades then
+        Notify(src, '~r~Grades invalides : ' .. gradeError)
+        return
+    end
+
+    local color = type(data.markerColor) == 'table' and data.markerColor or {}
+    local markerType = SanitizeInteger(data.markerType, 0, 43, 1)
+    local markerSize = SanitizeFloat(data.markerSize, 0.1, 10.0, 1.0)
+    local colorR = SanitizeInteger(color.r, 0, 255, 255)
+    local colorG = SanitizeInteger(color.g, 0, 255, 0)
+    local colorB = SanitizeInteger(color.b, 0, 255, 0)
+
+    local encodedCoffre = json.encode(posCoffre)
+    local encodedBoss = json.encode(posBoss)
+
+    exports.oxmysql:scalar('SELECT COUNT(*) FROM gangs WHERE name = ?', { name }, function(gangExists)
+        exports.oxmysql:scalar('SELECT COUNT(*) FROM jobs WHERE name = ?', { name }, function(jobExists)
+            local queries = {}
+
+            if (gangExists or 0) > 0 then
+                queries[#queries + 1] = {
+                    query = [[
+                        UPDATE gangs
+                        SET label = ?, pos_coffre = ?, pos_boss = ?, marker_type = ?, marker_size = ?,
+                            marker_color_r = ?, marker_color_g = ?, marker_color_b = ?
+                        WHERE name = ?
+                    ]],
+                    values = { label, encodedCoffre, encodedBoss, markerType, markerSize, colorR, colorG, colorB, name }
+                }
+            else
+                queries[#queries + 1] = {
+                    query = [[
+                        INSERT INTO gangs (name, label, pos_coffre, pos_boss, marker_type, marker_size, marker_color_r, marker_color_g, marker_color_b)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ]],
+                    values = { name, label, encodedCoffre, encodedBoss, markerType, markerSize, colorR, colorG, colorB }
+                }
+            end
+
+            if (jobExists or 0) > 0 then
+                queries[#queries + 1] = {
+                    query = 'UPDATE jobs SET label = ? WHERE name = ?',
+                    values = { label, name }
+                }
+            else
+                queries[#queries + 1] = {
+                    query = 'INSERT INTO jobs (name, label, whitelisted, SecondaryJob) VALUES (?, ?, 0, 1)',
+                    values = { name, label }
+                }
+            end
+
+            queries[#queries + 1] = {
+                query = 'DELETE FROM job_grades WHERE job_name = ?',
+                values = { name }
+            }
+
+            for _, grade in ipairs(grades) do
+                queries[#queries + 1] = {
+                    query = [[
+                        INSERT INTO job_grades (job_name, grade, name, label, salary, skin_male, skin_female)
+                        VALUES (?, ?, ?, ?, 0, ?, ?)
+                    ]],
+                    values = { name, grade.grade, grade.name, grade.label, '{}', '{}' }
+                }
+            end
+
+            exports.oxmysql:transaction(queries, function(success)
+                if not success then
+                    Notify(src, '~r~Erreur lors de l\'enregistrement du gang.')
+                    return
+                end
+
+                TriggerEvent('esx_society:registerSociety', name, label, 'society_' .. name, 'society', 'society', {})
                 RegisterGangStashes()
-                TriggerClientEvent("as_gangbuilder:requestRefresh", -1)
-                print('loaded')
-            end
-        end
+                TriggerClientEvent('as_gangbuilder:requestRefresh', -1)
 
-    -- GANG
-    exports.oxmysql:scalar("SELECT COUNT(*) FROM gangs WHERE name = ?", { data.name }, function(gangExists)
-        if gangExists > 0 then
-            exports.oxmysql:update([[
-                UPDATE gangs 
-                SET label = ?, pos_coffre = ?, pos_boss = ?, marker_type = ?, marker_size = ?, marker_color_r = ?, marker_color_g = ?, marker_color_b = ?
-                WHERE name = ?
-            ]], {
-                data.label,
-                posCoffre,
-                posBoss,
-                tonumber(data.markerType),
-                tonumber(data.markerSize),
-                data.markerColor.r,
-                data.markerColor.g,
-                data.markerColor.b,
-                data.name
-            }, function()
-                operationsCompleted.gang = true
-                checkAllCompleted()
+                Notify(src, '~g~Gang \'' .. label .. '\' enregistré avec succès.')
+                print(('[AsGangs] Gang "%s" enregistré par %s (ID %d).'):format(name, GetPlayerName(src) or 'console', src))
             end)
-        else
-            exports.oxmysql:insert([[
-                INSERT INTO gangs (name, label, pos_coffre, pos_boss, marker_type, marker_size, marker_color_r, marker_color_g, marker_color_b)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ]], {
-                data.name, data.label,
-                posCoffre,
-                posBoss,
-                tonumber(data.markerType),
-                tonumber(data.markerSize),
-                data.markerColor.r,
-                data.markerColor.g,
-                data.markerColor.b
-            }, function()
-                operationsCompleted.gang = true
-                checkAllCompleted()
-            end)
-        end
-    end)
-
-    -- JOB
-    exports.oxmysql:scalar("SELECT COUNT(*) FROM jobs WHERE name = ?", { data.name }, function(jobExists)
-        if jobExists > 0 then
-            exports.oxmysql:update("UPDATE jobs SET label = ? WHERE name = ?", {
-                data.label, data.name
-            }, function()
-                operationsCompleted.job = true
-                checkAllCompleted()
-            end)
-        else
-            exports.oxmysql:insert([[
-                INSERT INTO jobs (name, label, whitelisted, SecondaryJob)
-                VALUES (?, ?, 0, 1)
-            ]], {
-                data.name,
-                data.label
-            }, function()
-                operationsCompleted.job = true
-                checkAllCompleted()
-            end)
-        end
-    end)
-
-    
-    exports.oxmysql:execute("DELETE FROM job_grades WHERE job_name = ?", { data.name }, function()
-        local total = #data.grades
-        local inserted = 0
-
-        if total == 0 then
-            operationsCompleted.grades = true
-            checkAllCompleted()
-        end
-
-        for _, grade in ipairs(data.grades) do
-            exports.oxmysql:insert([[
-                INSERT INTO job_grades (job_name, grade, name, label, salary, skin_male, skin_female)
-                VALUES (?, ?, ?, ?, 0, ?, ?)
-            ]], {
-                data.name,
-                tonumber(grade.grade),
-                grade.name,
-                grade.label,
-                "{}", "{}"
-            }, function()
-                inserted = inserted + 1
-                if inserted == total then
-                    operationsCompleted.grades = true
-                    checkAllCompleted()
-                end
-            end)
-        end
-       
-       
-        
-
-
-    end)
-end)
-
-RegisterNetEvent("as_gangbuilder:deleteGang", function(gangName)
-    local src = source
-    if not gangName or gangName == "" then return end
-
-    exports.oxmysql:transaction({
-        {
-            query = 'DELETE FROM jobs WHERE name = ?',
-            values = { gangName }
-        },
-        {
-            query = 'DELETE FROM job_grades WHERE job_name = ?',
-            values = { gangName }
-        },
-        {
-            query = 'DELETE FROM gangs WHERE name = ?',
-            values = { gangName }
-        }
-    }, function(success)
-        if success then
-            TriggerClientEvent('esx:showNotification', src, 'Le gang a bien été supprimé.')
-            RegisterGangStashes()
-            TriggerClientEvent("as_gangbuilder:requestRefresh", -1)
-            print(("^1[AsGangs]^0 Gang supprimé : ^3%s^0 par joueur ID ^2%d^0"):format(gangName, src))
-        else
-            TriggerClientEvent('esx:showNotification', src, '~r~Erreur lors de la suppression.')
-        end
-    end)
-end)
-
-
-
-
-
-RegisterServerEvent("as_gangbuilder:getAllGangs")
-AddEventHandler("as_gangbuilder:getAllGangs", function()
-    local src = source
-
-    exports.oxmysql:query("SELECT * FROM gangs", {}, function(gangs)
-        if not gangs or #gangs == 0 then
-            TriggerClientEvent("as_gangbuilder:receiveGangs", src, {})
-            return
-        end
-
-        -- Initialisation des structures de grade
-        for i = 1, #gangs do
-            gangs[i].grades = {}
-        end
-
-        exports.oxmysql:query("SELECT job_name, grade, name, label FROM job_grades", {}, function(grades)
-            for _, grade in pairs(grades) do
-                for i = 1, #gangs do
-                    if grade.job_name == gangs[i].name then
-                        table.insert(gangs[i].grades, {
-                            grade = tonumber(grade.grade),
-                            name = grade.name,
-                            label = grade.label
-                        })
-                    end
-                end
-            end
-
-            TriggerClientEvent("as_gangbuilder:receiveGangs", src, gangs)
         end)
     end)
 end)
 
-------------------------------------------------------------------------------------
-------------------------------------------------------------------------------------
----------------------------------- BOSS --------------------------------------------
-------------------------------------------------------------------------------------
-------------------------------------------------------------------------------------
+RegisterNetEvent('as_gangbuilder:deleteGang', function(gangName)
+    local src = source
 
+    if not IsGangAdmin(src) then
+        Notify(src, '~r~Accès refusé.')
+        return
+    end
+
+    local name = SanitizeJobName(gangName)
+    if not name then return end
+
+    exports.oxmysql:transaction({
+        { query = 'DELETE FROM jobs WHERE name = ?', values = { name } },
+        { query = 'DELETE FROM job_grades WHERE job_name = ?', values = { name } },
+        { query = 'DELETE FROM gangs WHERE name = ?', values = { name } },
+        { query = 'UPDATE users SET job2 = ?, job2_grade = 0 WHERE job2 = ?', values = { Config.UnemployedJob, name } }
+    }, function(success)
+        if not success then
+            Notify(src, '~r~Erreur lors de la suppression.')
+            return
+        end
+
+        RegisterGangStashes()
+        TriggerClientEvent('as_gangbuilder:requestRefresh', -1)
+
+        Notify(src, '~g~Le gang a bien été supprimé.')
+        print(('[AsGangs] Gang "%s" supprimé par %s (ID %d).'):format(name, GetPlayerName(src) or 'console', src))
+    end)
+end)
+
+RegisterNetEvent('as_gangbuilder:getAllGangs', function()
+    local src = source
+
+    if not IsGangAdmin(src) then
+        Notify(src, '~r~Accès refusé.')
+        return
+    end
+
+    exports.oxmysql:query([[
+        SELECT name, label, pos_coffre, pos_boss, marker_type, marker_size, marker_color_r, marker_color_g, marker_color_b
+        FROM gangs
+    ]], {}, function(gangs)
+        if not gangs or #gangs == 0 then
+            TriggerClientEvent('as_gangbuilder:receiveGangs', src, {})
+            return
+        end
+
+        local index = {}
+        for i = 1, #gangs do
+            gangs[i].grades = {}
+            index[gangs[i].name] = gangs[i]
+        end
+
+        exports.oxmysql:query('SELECT job_name, grade, name, label FROM job_grades', {}, function(grades)
+            for _, grade in ipairs(grades or {}) do
+                local gang = index[grade.job_name]
+                if gang then
+                    gang.grades[#gang.grades + 1] = {
+                        grade = tonumber(grade.grade),
+                        name = grade.name,
+                        label = grade.label
+                    }
+                end
+            end
+
+            TriggerClientEvent('as_gangbuilder:receiveGangs', src, gangs)
+        end)
+    end)
+end)
+
+RegisterNetEvent('as_gangbuilder:getGangsForClient', function()
+    local src = source
+    local xPlayer, job2 = GetPlayerJob2(src)
+
+    if not xPlayer or not job2 or not job2.name or job2.name == Config.UnemployedJob then
+        TriggerClientEvent('as_gangbuilder:sendGangsToClient', src, {})
+        TriggerClientEvent('as_gangbuilder:sendCoffres', src, {})
+        return
+    end
+
+    exports.oxmysql:query([[
+        SELECT name, label, pos_coffre, pos_boss, marker_type, marker_size, marker_color_r, marker_color_g, marker_color_b
+        FROM gangs
+        WHERE name = ?
+    ]], { job2.name }, function(gangs)
+        gangs = gangs or {}
+        TriggerClientEvent('as_gangbuilder:sendGangsToClient', src, gangs)
+        TriggerClientEvent('as_gangbuilder:sendCoffres', src, gangs)
+    end)
+end)
+
+ESX.RegisterServerCallback('as_gangbuilder:isAdmin', function(source, cb)
+    cb(IsGangAdmin(source))
+end)
 
 ESX.RegisterServerCallback('as_gangbuilder:boss:getAllMembers', function(source, cb, gangName)
-    if not gangName or gangName == '' then
-        print("[AsGangs] [ERREUR] Nom du gang invalide fourni au callback.")
+    local src = source
+
+    if not IsGangBoss(src, gangName) then
         return cb({})
     end
 
@@ -208,41 +248,36 @@ ESX.RegisterServerCallback('as_gangbuilder:boss:getAllMembers', function(source,
         WHERE job2 = ?
     ]], { gangName }, function(users)
         if not users or #users == 0 then
-            print(('[AsGangs] Aucun membre trouvé pour le gang "%s".'):format(gangName))
             return cb({})
         end
 
-        exports.oxmysql:query("SELECT grade, label FROM job_grades WHERE job_name = ?", { gangName }, function(grades)
-            local gradeLabelMap = {}
-            local maxGrade = -1
+        exports.oxmysql:query('SELECT grade, label FROM job_grades WHERE job_name = ?', { gangName }, function(grades)
+            local gradeLabels, maxGrade = {}, -1
 
-            for _, grade in pairs(grades) do
-                local g = tonumber(grade.grade)
-                gradeLabelMap[g] = grade.label
-                if g > maxGrade then maxGrade = g end
+            for _, grade in ipairs(grades or {}) do
+                local level = tonumber(grade.grade)
+                gradeLabels[level] = grade.label
+                if level > maxGrade then maxGrade = level end
             end
 
-            local members = {}
-            local boss = nil
+            local members, boss = {}, nil
 
-            for _, user in pairs(users) do
-                local g = tonumber(user.job2_grade)
-                local label = gradeLabelMap[g] or "Inconnu"
-
-                local memberData = {
-                    identifier   = user.identifier,
-                    firstname    = user.firstname,
-                    lastname     = user.lastname,
-                    UniqueID     = user.UniqueID,
-                    job2         = user.job2,
-                    job2_grade   = g,
-                    gradeLabel   = label
+            for _, user in ipairs(users) do
+                local level = tonumber(user.job2_grade) or 0
+                local member = {
+                    identifier = user.identifier,
+                    firstname = user.firstname,
+                    lastname = user.lastname,
+                    UniqueID = user.UniqueID,
+                    job2 = user.job2,
+                    job2_grade = level,
+                    gradeLabel = gradeLabels[level] or 'Inconnu'
                 }
 
-                if g == maxGrade then
-                    boss = memberData
+                if level == maxGrade and not boss then
+                    boss = member
                 else
-                    table.insert(members, memberData)
+                    members[#members + 1] = member
                 end
             end
 
@@ -250,156 +285,203 @@ ESX.RegisterServerCallback('as_gangbuilder:boss:getAllMembers', function(source,
                 table.insert(members, 1, boss)
             end
 
-            print(('[AsGangs] %d membre(s) chargés pour le gang "%s".'):format(#members, gangName))
-            for i, m in ipairs(members) do
-                local lock = (i == 1 and m.job2_grade == maxGrade) and " (BOSS - LOCK)" or ""
-                print(('  → %s %s | ID: %s | Grade: %s%s')
-                    :format(m.firstname, m.lastname, m.UniqueID, m.gradeLabel, lock))
-            end
-
+            DebugLog(('%d membre(s) chargés pour le gang "%s".'):format(#members, gangName))
             cb(members)
         end)
     end)
 end)
 
+local function withManagedMember(src, identifier, cb)
+    if type(identifier) ~= 'string' or identifier == '' then return end
 
-RegisterServerEvent('as_gangbuilder:boss:fireMember')
-AddEventHandler('as_gangbuilder:boss:fireMember', function(identifier)
-    if not identifier then return end
+    local xPlayer, job2 = GetPlayerJob2(src)
+    if not xPlayer or not job2 or job2.name == Config.UnemployedJob or job2.grade_name ~= Config.BossGradeName then
+        Notify(src, '~r~Accès refusé.')
+        return
+    end
 
-    exports.oxmysql:update("UPDATE users SET job2 = 'unemployed', job2_grade = 0 WHERE identifier = ?", {identifier}, function(rowsChanged)
-        if rowsChanged  then
-            TriggerClientEvent("esx:showNotification", source, "~r~Le membre a été viré du gang.")
-        else
-            TriggerClientEvent("esx:showNotification", source, "~r~Impossible de virer ce membre.")
-        end
-    end)
-end)
+    if xPlayer.identifier == identifier then
+        Notify(src, '~r~Vous ne pouvez pas vous gérer vous-même.')
+        return
+    end
 
-RegisterServerEvent('as_gangbuilder:boss:promoteMember')
-AddEventHandler('as_gangbuilder:boss:promoteMember', function(identifier, currentGrade)
-    if not identifier or currentGrade == nil then return end
-    local newGrade = tonumber(currentGrade) + 1
+    exports.oxmysql:query('SELECT job2, job2_grade FROM users WHERE identifier = ?', { identifier }, function(rows)
+        local target = rows and rows[1]
 
-    exports.oxmysql:query("SELECT MAX(grade) as maxGrade FROM job_grades WHERE job_name = (SELECT job2 FROM users WHERE identifier = ?)", {identifier}, function(result)
-        local maxGrade = tonumber(result[1].maxGrade or 0)
-
-        if newGrade >= maxGrade then
-            TriggerClientEvent("esx:showNotification", source, "~r~Promotion impossible : tu ne peux pas promouvoir au rang boss.")
+        if not target or target.job2 ~= job2.name then
+            Notify(src, '~r~Ce joueur ne fait pas partie de votre gang.')
             return
         end
 
-        exports.oxmysql:update("UPDATE users SET job2_grade = ? WHERE identifier = ?", {newGrade, identifier}, function(rowsChanged)
-            if rowsChanged then
-                TriggerClientEvent("esx:showNotification", source, ("~g~Membre promu au grade %d."):format(newGrade))
-            else
-                TriggerClientEvent("esx:showNotification", source, "~r~La promotion a échoué.")
+        GetGangGradeBounds(job2.name, function(minGrade, maxGrade)
+            if not maxGrade then
+                Notify(src, '~r~Aucun grade défini pour ce gang.')
+                return
             end
+
+            local targetGrade = tonumber(target.job2_grade) or 0
+            if targetGrade >= maxGrade then
+                Notify(src, '~r~Vous ne pouvez pas gérer un autre boss.')
+                return
+            end
+
+            cb(job2.name, targetGrade, minGrade, maxGrade)
+        end)
+    end)
+end
+
+RegisterNetEvent('as_gangbuilder:boss:fireMember', function(identifier)
+    local src = source
+
+    withManagedMember(src, identifier, function()
+        ApplyJob2(identifier, Config.UnemployedJob, 0, function(done)
+            Notify(src, done and '~r~Le membre a été viré du gang.' or '~r~Impossible de virer ce membre.')
         end)
     end)
 end)
 
-RegisterServerEvent('as_gangbuilder:boss:demoteMember')
-AddEventHandler('as_gangbuilder:boss:demoteMember', function(identifier, currentGrade)
-    if not identifier or currentGrade == nil then return end
-    local newGrade = tonumber(currentGrade) - 1
+RegisterNetEvent('as_gangbuilder:boss:promoteMember', function(identifier)
+    local src = source
 
-    if newGrade < 0 then
-        TriggerClientEvent("esx:showNotification", source, "~r~Rétrogradation impossible : grade minimal atteint.")
+    withManagedMember(src, identifier, function(gangName, targetGrade, _, maxGrade)
+        local newGrade = targetGrade + 1
+
+        if newGrade >= maxGrade then
+            Notify(src, '~r~Promotion impossible : tu ne peux pas promouvoir au rang boss.')
+            return
+        end
+
+        exports.oxmysql:scalar('SELECT COUNT(*) FROM job_grades WHERE job_name = ? AND grade = ?', { gangName, newGrade }, function(exists)
+            if (exists or 0) == 0 then
+                Notify(src, '~r~Ce grade n\'existe pas dans le gang.')
+                return
+            end
+
+            ApplyJob2(identifier, gangName, newGrade, function(done)
+                Notify(src, done and ('~g~Membre promu au grade %d.'):format(newGrade) or '~r~La promotion a échoué.')
+            end)
+        end)
+    end)
+end)
+
+RegisterNetEvent('as_gangbuilder:boss:demoteMember', function(identifier)
+    local src = source
+
+    withManagedMember(src, identifier, function(gangName, targetGrade, minGrade)
+        local newGrade = targetGrade - 1
+
+        if newGrade < (minGrade or 0) then
+            Notify(src, '~r~Rétrogradation impossible : grade minimal atteint.')
+            return
+        end
+
+        exports.oxmysql:scalar('SELECT COUNT(*) FROM job_grades WHERE job_name = ? AND grade = ?', { gangName, newGrade }, function(exists)
+            if (exists or 0) == 0 then
+                Notify(src, '~r~Ce grade n\'existe pas dans le gang.')
+                return
+            end
+
+            ApplyJob2(identifier, gangName, newGrade, function(done)
+                Notify(src, done and ('~y~Membre rétrogradé au grade %d.'):format(newGrade) or '~r~Échec de la rétrogradation.')
+            end)
+        end)
+    end)
+end)
+
+local function readGangFunds(column)
+    return function(source, cb, gangName)
+        if not IsGangBoss(source, gangName) then
+            return cb(0)
+        end
+
+        exports.oxmysql:scalar(('SELECT %s FROM gangs WHERE name = ?'):format(column), { gangName }, function(amount)
+            cb(tonumber(amount) or 0)
+        end)
+    end
+end
+
+ESX.RegisterServerCallback('as_gangbuilder:getGangMoney', readGangFunds('money'))
+ESX.RegisterServerCallback('as_gangbuilder:getGangBlackMoney', readGangFunds('black_money'))
+
+local function depositFunds(src, gangName, rawAmount, column, account)
+    if not IsGangBoss(src, gangName) then return end
+
+    local amount = SanitizeAmount(rawAmount)
+    if not amount then
+        Notify(src, '~r~Montant invalide.')
         return
     end
 
-    exports.oxmysql:query("SELECT 1 FROM job_grades WHERE job_name = (SELECT job2 FROM users WHERE identifier = ?) AND grade = ?", {identifier, newGrade}, function(result)
-        if result and #result > 0 then
-            exports.oxmysql:update("UPDATE users SET job2_grade = ? WHERE identifier = ?", {newGrade, identifier}, function(rowsChanged)
-                if rowsChanged  then
-                    TriggerClientEvent("esx:showNotification", source, ("~y~Membre rétrogradé au grade %d."):format(newGrade))
-                else
-                    TriggerClientEvent("esx:showNotification", source, "~r~Échec de la rétrogradation.")
-                end
-            end)
-        else
-            TriggerClientEvent("esx:showNotification", source, "~r~Ce grade n'existe pas dans le métier.")
-        end
-    end)
-end)
+    local xPlayer = ESX.GetPlayerFromId(src)
+    if not xPlayer then return end
 
+    local available = account and xPlayer.getAccount(account).money or xPlayer.getMoney()
+    if available < amount then
+        Notify(src, '~r~Fonds insuffisants pour déposer.')
+        return
+    end
 
-
-
-ESX = exports['es_extended']:getSharedObject()
-
--- Callback: Obtenir l'argent propre du gang
-ESX.RegisterServerCallback('as_gangbuilder:getGangMoney', function(source, cb, gangName)
-    exports.oxmysql:scalar("SELECT money FROM gangs WHERE name = ?", {gangName}, function(money)
-        cb(money or 0)
-    end)
-end)
-
--- Callback: Obtenir l'argent sale du gang
-ESX.RegisterServerCallback('as_gangbuilder:getGangBlackMoney', function(source, cb, gangName)
-    exports.oxmysql:scalar("SELECT black_money FROM gangs WHERE name = ?", {gangName}, function(money)
-        cb(money or 0)
-    end)
-end)
-
--- Dépôt argent propre
-RegisterServerEvent("as_gangbuilder:depositGangMoney")
-AddEventHandler("as_gangbuilder:depositGangMoney", function(gangName, amount)
-    local xPlayer = ESX.GetPlayerFromId(source)
-    if xPlayer and amount > 0 and xPlayer.getMoney() >= amount then
+    if account then
+        xPlayer.removeAccountMoney(account, amount)
+    else
         xPlayer.removeMoney(amount)
-        exports.oxmysql:update("UPDATE gangs SET money = money + ? WHERE name = ?", {amount, gangName})
-        xPlayer.showNotification("~g~Vous avez déposé ~s~" .. amount .. "$ dans la caisse du gang.")
-    else
-        xPlayer.showNotification("~r~Fonds insuffisants pour déposer.")
     end
-end)
 
--- Retrait argent propre
-RegisterServerEvent("as_gangbuilder:withdrawGangMoney")
-AddEventHandler("as_gangbuilder:withdrawGangMoney", function(gangName, amount)
-    local xPlayer = ESX.GetPlayerFromId(source)
-    if not xPlayer or amount <= 0 then return end
+    exports.oxmysql:update(('UPDATE gangs SET %s = %s + ? WHERE name = ?'):format(column, column), { amount, gangName }, function(affected)
+        if (affected or 0) > 0 then
+            Notify(src, ('~g~Vous avez déposé ~s~%d$ dans la caisse du gang.'):format(amount))
+            return
+        end
 
-    exports.oxmysql:scalar("SELECT money FROM gangs WHERE name = ?", {gangName}, function(gangMoney)
-        if gangMoney and gangMoney >= amount then
-            exports.oxmysql:update("UPDATE gangs SET money = money - ? WHERE name = ?", {amount, gangName})
+        if account then
+            xPlayer.addAccountMoney(account, amount)
+        else
             xPlayer.addMoney(amount)
-            xPlayer.showNotification("~g~Vous avez retiré ~s~" .. amount .. "$ du coffre de gang.")
-        else
-            xPlayer.showNotification("~r~Le coffre ne contient pas assez d'argent.")
         end
+        Notify(src, '~r~Dépôt impossible : gang introuvable.')
     end)
-end)
+end
 
--- Dépôt argent sale
-RegisterServerEvent("as_gangbuilder:depositGangBlackMoney")
-AddEventHandler("as_gangbuilder:depositGangBlackMoney", function(gangName, amount)
-    local xPlayer = ESX.GetPlayerFromId(source)
-    if xPlayer and amount > 0 and xPlayer.getAccount('black_money').money >= amount then
-        xPlayer.removeAccountMoney('black_money', amount)
-        exports.oxmysql:update("UPDATE gangs SET black_money = black_money + ? WHERE name = ?", {amount, gangName})
-        xPlayer.showNotification("~g~Argent sale déposé : ~s~" .. amount .. "$.")
-    else
-        xPlayer.showNotification("~r~Argent sale insuffisant.")
+local function withdrawFunds(src, gangName, rawAmount, column, account)
+    if not IsGangBoss(src, gangName) then return end
+
+    local amount = SanitizeAmount(rawAmount)
+    if not amount then
+        Notify(src, '~r~Montant invalide.')
+        return
     end
-end)
 
--- Retrait argent sale
-RegisterServerEvent("as_gangbuilder:withdrawGangBlackMoney")
-AddEventHandler("as_gangbuilder:withdrawGangBlackMoney", function(gangName, amount)
-    local xPlayer = ESX.GetPlayerFromId(source)
-    if not xPlayer or amount <= 0 then return end
+    local xPlayer = ESX.GetPlayerFromId(src)
+    if not xPlayer then return end
 
-    exports.oxmysql:scalar("SELECT black_money FROM gangs WHERE name = ?", {gangName}, function(gangBlackMoney)
-        if gangBlackMoney and gangBlackMoney >= amount then
-            exports.oxmysql:update("UPDATE gangs SET black_money = black_money - ? WHERE name = ?", {amount, gangName})
-            xPlayer.addAccountMoney('black_money', amount)
-            xPlayer.showNotification("~g~Vous avez retiré ~s~" .. amount .. "$ d'argent sale du gang.")
-        else
-            xPlayer.showNotification("~r~Fonds d'argent sale insuffisants.")
+    exports.oxmysql:update(('UPDATE gangs SET %s = %s - ? WHERE name = ? AND %s >= ?'):format(column, column, column), { amount, gangName, amount }, function(affected)
+        if (affected or 0) == 0 then
+            Notify(src, '~r~Le coffre ne contient pas assez d\'argent.')
+            return
         end
+
+        if account then
+            xPlayer.addAccountMoney(account, amount)
+        else
+            xPlayer.addMoney(amount)
+        end
+
+        Notify(src, ('~g~Vous avez retiré ~s~%d$ du coffre de gang.'):format(amount))
     end)
+end
+
+RegisterNetEvent('as_gangbuilder:depositGangMoney', function(gangName, amount)
+    depositFunds(source, gangName, amount, 'money', nil)
 end)
 
+RegisterNetEvent('as_gangbuilder:withdrawGangMoney', function(gangName, amount)
+    withdrawFunds(source, gangName, amount, 'money', nil)
+end)
+
+RegisterNetEvent('as_gangbuilder:depositGangBlackMoney', function(gangName, amount)
+    depositFunds(source, gangName, amount, 'black_money', 'black_money')
+end)
+
+RegisterNetEvent('as_gangbuilder:withdrawGangBlackMoney', function(gangName, amount)
+    withdrawFunds(source, gangName, amount, 'black_money', 'black_money')
+end)

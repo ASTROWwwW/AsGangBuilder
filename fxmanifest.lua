@@ -1,65 +1,59 @@
 fx_version 'cerulean'
 game 'gta5'
-author 'Astrxw'
-
-version '1.0'
 lua54 'yes'
-escrow_ignore {
-    "config.lua",
-    "src/RMenu.lua",
-    "src/menu/RageUI.lua",
-    "src/menu/Menu.lua",
-    "src/menu/MenuController.lua",
 
-    "src/components/*.lua",
+author 'Astrxw'
+description 'Gang builder ESX (job2) : creation de gangs, coffre, menu boss et interactions'
+version '1.1.0'
 
-    "src/menu/elements/*.lua",
-
-    "src/menu/items/*.lua",
-
-    "src/menu/panels/*.lua",
-
-    "src/menu/panels/*.lua",
-    "src/menu/windows/*.lua",
-    "fxmanifest.lua"
-}
-
-client_scripts {
-    "src/RMenu.lua",
-    "src/menu/RageUI.lua",
-    "src/menu/Menu.lua",
-    "src/menu/MenuController.lua",
-
-    "src/components/*.lua",
-
-    "src/menu/elements/*.lua",
-
-    "src/menu/items/*.lua",
-
-    "src/menu/panels/*.lua",
-
-    "src/menu/panels/*.lua",
-    "src/menu/windows/*.lua",
-
+dependencies {
+    'es_extended',
+    'oxmysql',
+    'ox_inventory'
 }
 
 shared_scripts {
-    "config.lua",
-}
-
-server_scripts {
+    '@es_extended/imports.lua',
     '@es_extended/locale.lua',
-    '@oxmysql/lib/MySQL.lua',
-    "config.lua",
-    'server/*.lua'
+    'config.lua'
 }
 
 client_scripts {
-    '@es_extended/locale.lua',
-  "config.lua",
-    'client/*.lua'
+    'src/RMenu.lua',
+    'src/menu/RageUI.lua',
+    'src/menu/Menu.lua',
+    'src/menu/MenuController.lua',
+    'src/components/*.lua',
+    'src/menu/elements/*.lua',
+    'src/menu/items/*.lua',
+    'src/menu/panels/*.lua',
+    'src/menu/windows/*.lua',
+
+    'client/shared.lua',
+    'client/boss.lua',
+    'client/coffre.lua',
+    'client/F7.lua',
+    'client/menu.lua'
 }
 
-shared_script '@es_extended/imports.lua'
+server_scripts {
+    '@oxmysql/lib/MySQL.lua',
+    'server/utils.lua',
+    'server/server.lua',
+    'server/sv_coffre.lua',
+    'server/sv_f7.lua'
+}
 
-
+escrow_ignore {
+    'fxmanifest.lua',
+    'config.lua',
+    'src/RMenu.lua',
+    'src/menu/RageUI.lua',
+    'src/menu/Menu.lua',
+    'src/menu/MenuController.lua',
+    'src/components/*.lua',
+    'src/menu/elements/*.lua',
+    'src/menu/items/*.lua',
+    'src/menu/panels/*.lua',
+    'src/menu/windows/*.lua'
+}

@@ -1,146 +1,225 @@
-ESX = exports["es_extended"]:getSharedObject()
+local tiedPlayers = {}
 
-RegisterServerEvent('as_gangbuilder:recruter')
-AddEventHandler('as_gangbuilder:recruter', function(targetId, jobName)
-    local xTarget = ESX.GetPlayerFromId(targetId)
-    if xTarget then
-        xTarget.setJob2(jobName, 1)
-        TriggerClientEvent('esx:showNotification', targetId, "~b~Vous avez été recruté dans le gang : ~s~" .. jobName)
+local function getBossContext(src, targetId)
+    local xPlayer, job2 = GetPlayerJob2(src)
+
+    if not xPlayer or not job2 or job2.name == Config.UnemployedJob or job2.grade_name ~= Config.BossGradeName then
+        Notify(src, '~r~Accès refusé.')
+        return nil
     end
-end)
 
-RegisterServerEvent('as_gangbuilder:virer')
-AddEventHandler('as_gangbuilder:virer', function(targetId)
-    local xTarget = ESX.GetPlayerFromId(targetId)
-    if xTarget then
-        xTarget.setJob2('unemployed', 0)
-        TriggerClientEvent('esx:showNotification', targetId, "~r~Vous avez été viré de votre gang.")
+    if not IsPlayerNear(src, targetId, Config.PlayerInteractDistance) then
+        Notify(src, '~r~Aucun joueur à proximité.')
+        return nil
     end
-end)
 
-RegisterServerEvent('as_gangbuilder:promouvoir')
-AddEventHandler('as_gangbuilder:promouvoir', function(targetId)
-    local xTarget = ESX.GetPlayerFromId(targetId)
-    if xTarget then
-        local currentGrade = xTarget.getJob2().grade
-        local jobName = xTarget.getJob2().name
+    local xTarget = ESX.GetPlayerFromId(tonumber(targetId))
+    if not xTarget then return nil end
 
-        exports.oxmysql:query("SELECT MAX(grade) as max FROM job_grades WHERE job_name = ?", { jobName }, function(result)
-            if result and result[1] and tonumber(result[1].max) > currentGrade then
-                xTarget.setJob2(jobName, currentGrade + 1)
-                TriggerClientEvent('esx:showNotification', targetId, "~g~Vous avez été promu dans le gang")
-            else
-                TriggerClientEvent('esx:showNotification', source, "~r~Promotion impossible : grade max atteint.")
-            end
-        end)
+    return xPlayer, job2, xTarget
+end
+
+local function getMemberContext(src, targetId)
+    local xPlayer, job2 = GetPlayerJob2(src)
+
+    if not xPlayer or not job2 or job2.name == Config.UnemployedJob then
+        Notify(src, '~r~Accès refusé.')
+        return nil
     end
-end)
 
-RegisterServerEvent('as_gangbuilder:destituer')
-AddEventHandler('as_gangbuilder:destituer', function(targetId)
-    local xTarget = ESX.GetPlayerFromId(targetId)
-    if xTarget then
-        local currentGrade = xTarget.getJob2().grade
-        local jobName = xTarget.getJob2().name
+    if not IsPlayerNear(src, targetId, Config.PlayerInteractDistance) then
+        Notify(src, '~r~Aucun joueur à proximité.')
+        return nil
+    end
 
-        if currentGrade <= 0 then
-            TriggerClientEvent('esx:showNotification', source, "~r~Ce joueur est déjà au grade minimal.")
+    local xTarget = ESX.GetPlayerFromId(tonumber(targetId))
+    if not xTarget then return nil end
+
+    return xPlayer, job2, xTarget
+end
+
+RegisterNetEvent('as_gangbuilder:recruter', function(targetId)
+    local src = source
+    local _, job2, xTarget = getBossContext(src, targetId)
+    if not job2 then return end
+
+    if xTarget.job2 and xTarget.job2.name ~= Config.UnemployedJob then
+        Notify(src, '~r~Ce joueur appartient déjà à un gang.')
+        return
+    end
+
+    GetGangGradeBounds(job2.name, function(minGrade)
+        if not minGrade then
+            Notify(src, '~r~Aucun grade défini pour ce gang.')
             return
         end
 
-        xTarget.setJob2(jobName, currentGrade - 1)
-        TriggerClientEvent('esx:showNotification', targetId, "~y~Vous avez été rétrogradé dans le gang")
+        xTarget.setJob2(job2.name, minGrade)
+        Notify(xTarget.source, '~b~Vous avez été recruté dans le gang : ~s~' .. job2.name)
+        Notify(src, '~g~Joueur recruté.')
+    end)
+end)
+
+RegisterNetEvent('as_gangbuilder:virer', function(targetId)
+    local src = source
+    local _, job2, xTarget = getBossContext(src, targetId)
+    if not job2 then return end
+
+    if not xTarget.job2 or xTarget.job2.name ~= job2.name then
+        Notify(src, '~r~Ce joueur ne fait pas partie de votre gang.')
+        return
     end
+
+    if xTarget.job2.grade_name == Config.BossGradeName then
+        Notify(src, '~r~Vous ne pouvez pas virer un boss.')
+        return
+    end
+
+    xTarget.setJob2(Config.UnemployedJob, 0)
+    Notify(xTarget.source, '~r~Vous avez été viré de votre gang.')
+    Notify(src, '~g~Joueur viré du gang.')
+end)
+
+RegisterNetEvent('as_gangbuilder:promouvoir', function(targetId)
+    local src = source
+    local _, job2, xTarget = getBossContext(src, targetId)
+    if not job2 then return end
+
+    if not xTarget.job2 or xTarget.job2.name ~= job2.name then
+        Notify(src, '~r~Ce joueur ne fait pas partie de votre gang.')
+        return
+    end
+
+    local currentGrade = tonumber(xTarget.job2.grade) or 0
+
+    GetGangGradeBounds(job2.name, function(_, maxGrade)
+        if not maxGrade then return end
+
+        local newGrade = currentGrade + 1
+        if newGrade >= maxGrade then
+            Notify(src, '~r~Promotion impossible : rang boss atteint.')
+            return
+        end
+
+        exports.oxmysql:scalar('SELECT COUNT(*) FROM job_grades WHERE job_name = ? AND grade = ?', { job2.name, newGrade }, function(exists)
+            if (exists or 0) == 0 then
+                Notify(src, '~r~Ce grade n\'existe pas dans le gang.')
+                return
+            end
+
+            xTarget.setJob2(job2.name, newGrade)
+            Notify(xTarget.source, '~g~Vous avez été promu dans le gang.')
+            Notify(src, '~g~Joueur promu.')
+        end)
+    end)
+end)
+
+RegisterNetEvent('as_gangbuilder:destituer', function(targetId)
+    local src = source
+    local _, job2, xTarget = getBossContext(src, targetId)
+    if not job2 then return end
+
+    if not xTarget.job2 or xTarget.job2.name ~= job2.name then
+        Notify(src, '~r~Ce joueur ne fait pas partie de votre gang.')
+        return
+    end
+
+    if xTarget.job2.grade_name == Config.BossGradeName then
+        Notify(src, '~r~Vous ne pouvez pas rétrograder un boss.')
+        return
+    end
+
+    local currentGrade = tonumber(xTarget.job2.grade) or 0
+
+    GetGangGradeBounds(job2.name, function(minGrade)
+        if not minGrade then return end
+
+        local newGrade = currentGrade - 1
+        if newGrade < minGrade then
+            Notify(src, '~r~Ce joueur est déjà au grade minimal.')
+            return
+        end
+
+        exports.oxmysql:scalar('SELECT COUNT(*) FROM job_grades WHERE job_name = ? AND grade = ?', { job2.name, newGrade }, function(exists)
+            if (exists or 0) == 0 then
+                Notify(src, '~r~Ce grade n\'existe pas dans le gang.')
+                return
+            end
+
+            xTarget.setJob2(job2.name, newGrade)
+            Notify(xTarget.source, '~y~Vous avez été rétrogradé dans le gang.')
+            Notify(src, '~y~Joueur rétrogradé.')
+        end)
+    end)
 end)
 
 ESX.RegisterServerCallback('as_gangbuilder:fouille', function(source, cb, targetId)
-    local xTarget = ESX.GetPlayerFromId(targetId)
-    if not xTarget then return cb({}) end
+    local _, _, xTarget = getMemberContext(source, targetId)
+    if not xTarget then return cb(nil) end
 
-    local data = {
+    cb({
         inventory = xTarget.getInventory(),
         money = xTarget.getMoney(),
         black_money = xTarget.getAccount('black_money').money,
         loadout = xTarget.getLoadout()
-    }
-
-    cb(data)
+    })
 end)
 
--- Ligotage / Véhicule
-RegisterServerEvent('as_gangbuilder:ligoter')
-AddEventHandler('as_gangbuilder:ligoter', function(target)
-    TriggerClientEvent('as_gangbuilder:client:ligoter', target)
-end)
+RegisterNetEvent('as_gangbuilder:toggleLigotage', function(targetId)
+    local src = source
+    local _, _, xTarget = getMemberContext(src, targetId)
+    if not xTarget then return end
 
-RegisterServerEvent('as_gangbuilder:deligoter')
-AddEventHandler('as_gangbuilder:deligoter', function(target)
-    TriggerClientEvent('as_gangbuilder:client:deligoter', target)
-end)
-local ligotterPlayers = {} 
+    local target = xTarget.source
 
-ESX.RegisterServerCallback('as_gangbuilder:checkLigotage', function(_, cb, target)
-    cb(ligotterPlayers[target] == true)
-end)
-
-ESX.RegisterServerCallback('as_gangbuilder:isInVehicle', function(_, cb, target)
-    local xTarget = ESX.GetPlayerFromId(target)
-    if xTarget then
-        TriggerClientEvent('as_gangbuilder:checkInVehicleClient', xTarget.source, function(isInVeh)
-            cb(isInVeh)
-        end)
+    if tiedPlayers[target] then
+        tiedPlayers[target] = nil
+        TriggerClientEvent('as_gangbuilder:client:deligoter', target)
+        Notify(src, '~g~Le joueur a été détaché.')
     else
-        cb(false)
+        tiedPlayers[target] = true
+        TriggerClientEvent('as_gangbuilder:client:ligoter', target)
+        Notify(src, '~o~Le joueur a été ligoté.')
     end
 end)
 
-RegisterServerEvent('as_gangbuilder:mettreVehicule')
-AddEventHandler('as_gangbuilder:mettreVehicule', function(target, vehNetId, seat)
-    TriggerClientEvent('as_gangbuilder:client:mettreVehicule', target, vehNetId, seat)
-end)
+RegisterNetEvent('as_gangbuilder:toggleVehicule', function(targetId, vehNetId, seat)
+    local src = source
+    local _, _, xTarget = getMemberContext(src, targetId)
+    if not xTarget then return end
 
-RegisterServerEvent('as_gangbuilder:sortirVehicule')
-AddEventHandler('as_gangbuilder:sortirVehicule', function(target)
-    TriggerClientEvent('as_gangbuilder:client:sortirVehicule', target)
-end)
+    local target = xTarget.source
+    local targetPed = GetPlayerPed(target)
+    if targetPed == 0 then return end
 
-
--- handlers/client/astrxwf7_handlers.lua
-
-RegisterNetEvent('as_gangbuilder:gang:ligotter')
-AddEventHandler('as_gangbuilder:gang:ligotter', function()
-    local playerPed = PlayerPedId()
-    RequestAnimDict('mp_arresting')
-    while not HasAnimDictLoaded('mp_arresting') do Wait(0) end
-    TaskPlayAnim(playerPed, 'mp_arresting', 'idle', 8.0, -8, -1, 49, 0, false, false, false)
-    SetEnableHandcuffs(playerPed, true)
-    DisablePlayerFiring(playerPed, true)
-    SetCurrentPedWeapon(playerPed, `WEAPON_UNARMED`, true)
-    FreezeEntityPosition(playerPed, true)
-end)
-
-RegisterNetEvent('as_gangbuilder:gang:deligotter')
-AddEventHandler('as_gangbuilder:gang:deligotter', function()
-    local playerPed = PlayerPedId()
-    ClearPedTasks(playerPed)
-    SetEnableHandcuffs(playerPed, false)
-    DisablePlayerFiring(playerPed, false)
-    FreezeEntityPosition(playerPed, false)
-end)
-
-RegisterNetEvent('as_gangbuilder:gang:putInVehicle')
-AddEventHandler('as_gangbuilder:gang:putInVehicle', function(netVeh, seat)
-    local playerPed = PlayerPedId()
-    local vehicle = NetToVeh(netVeh)
-    if DoesEntityExist(vehicle) then
-        TaskWarpPedIntoVehicle(playerPed, vehicle, seat)
+    if GetVehiclePedIsIn(targetPed) ~= 0 then
+        TriggerClientEvent('as_gangbuilder:client:sortirVehicule', target)
+        Notify(src, '~g~Joueur sorti du véhicule.')
+        return
     end
+
+    local netId = tonumber(vehNetId)
+    local seatIndex = tonumber(seat)
+    if not netId or not seatIndex then
+        Notify(src, '~r~Aucun véhicule ou siège disponible.')
+        return
+    end
+
+    local vehicle = NetworkGetEntityFromNetworkId(netId)
+    if vehicle == 0 or not DoesEntityExist(vehicle) then
+        Notify(src, '~r~Aucun véhicule proche.')
+        return
+    end
+
+    if #(GetEntityCoords(targetPed) - GetEntityCoords(vehicle)) > Config.VehicleInteractDistance then
+        Notify(src, '~r~Le véhicule est trop loin.')
+        return
+    end
+
+    TriggerClientEvent('as_gangbuilder:client:mettreVehicule', target, netId, math.floor(seatIndex))
+    Notify(src, '~g~Joueur placé dans le véhicule.')
 end)
 
-RegisterNetEvent('as_gangbuilder:gang:outVehicle')
-AddEventHandler('as_gangbuilder:gang:outVehicle', function()
-    local playerPed = PlayerPedId()
-    if IsPedInAnyVehicle(playerPed, false) then
-        TaskLeaveVehicle(playerPed, GetVehiclePedIsIn(playerPed, false), 16)
-    end
+AddEventHandler('playerDropped', function()
+    tiedPlayers[source] = nil
 end)
