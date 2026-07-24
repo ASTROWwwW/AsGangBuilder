@@ -1,53 +1,61 @@
-local ox_inventory = exports.ox_inventory
+local gangStashes = {}
 
 function RegisterGangStashes()
-    exports.oxmysql:execute("SELECT * FROM gangs", {}, function(gangs)
-        for _, gang in ipairs(gangs) do
+    exports.oxmysql:query('SELECT name, label, pos_coffre FROM gangs', {}, function(gangs)
+        gangStashes = {}
+
+        for _, gang in ipairs(gangs or {}) do
             if gang.name and gang.label and gang.pos_coffre then
                 local pos = json.decode(gang.pos_coffre)
-                if pos and pos.x and pos.y and pos.z then
-                    local stashId = "gangstash_" .. gang.name
 
-                    -- Enregistrement basique du stash sans restriction job (job2 non géré nativement)
-                    ox_inventory:RegisterStash(
+                if pos and pos.x and pos.y and pos.z then
+                    local coords = vector3(pos.x + 0.0, pos.y + 0.0, pos.z + 0.0)
+                    local stashId = 'gangstash_' .. gang.name
+
+                    gangStashes[gang.name] = coords
+
+                    exports.ox_inventory:RegisterStash(
                         stashId,
-                        "Coffre de gang - " .. gang.label,
-                        40,
-                        100000
+                        'Coffre de gang - ' .. gang.label,
+                        Config.StashSlots,
+                        Config.StashWeight,
+                        false,
+                        nil,
+                        coords
                     )
 
-                    print(('[AsGangs] Coffre "%s" enregistré à %.2f %.2f %.2f'):format(stashId, pos.x, pos.y, pos.z))
+                    DebugLog(('Coffre "%s" enregistré à %.2f %.2f %.2f'):format(stashId, coords.x, coords.y, coords.z))
                 end
             end
         end
     end)
 end
 
-RegisterNetEvent("as_gangbuilder:getGangsForClient")
-AddEventHandler("as_gangbuilder:getGangsForClient", function()
+RegisterNetEvent('as_gangbuilder:openGangStash', function(gangName)
     local src = source
-    exports.oxmysql:execute("SELECT * FROM gangs", {}, function(result)
-        TriggerClientEvent("as_gangbuilder:sendCoffres", src, result)
-    end)
-end)
 
-
-RegisterServerEvent("as_gangbuilder:openGangStash")
-AddEventHandler("as_gangbuilder:openGangStash", function(gangName)
-    local src = source
-    local xPlayer = ESX.GetPlayerFromId(src)
-    if not xPlayer then return end
-
-    if xPlayer.job2 and xPlayer.job2.name == gangName then
-        local stashId = "gangstash_" .. gangName
-        exports.ox_inventory:forceOpenInventory(source, 'stash', stashId)
-    else
-        print(("[AsGangs] Refus d'ouverture du coffre pour %s (job2=%s)"):format(xPlayer.identifier, xPlayer.job2 and xPlayer.job2.name or "nil"))
-        DropPlayer(src, "Tentative d'accès à un coffre de gang non autorisé.")
+    if not IsGangMember(src, gangName) then
+        Notify(src, '~r~Vous n\'avez pas accès à ce coffre.')
+        DebugLog(('Refus d\'ouverture du coffre "%s" pour l\'ID %d.'):format(tostring(gangName), src))
+        return
     end
+
+    local coords = gangStashes[gangName]
+    if not coords then
+        Notify(src, '~r~Coffre introuvable.')
+        return
+    end
+
+    local ped = GetPlayerPed(src)
+    if ped == 0 or #(GetEntityCoords(ped) - coords) > Config.PlayerInteractDistance then
+        Notify(src, '~r~Vous êtes trop loin du coffre.')
+        return
+    end
+
+    exports.ox_inventory:forceOpenInventory(src, 'stash', 'gangstash_' .. gangName)
 end)
 
-AddEventHandler("onResourceStart", function(resource)
+AddEventHandler('onResourceStart', function(resource)
     if resource == GetCurrentResourceName() then
         Wait(1000)
         RegisterGangStashes()

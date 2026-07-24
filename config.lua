@@ -1,43 +1,22 @@
-Gang = {}
-Gang.__index = Gang
+Config = {}
 
-function Gang:new(name, label)
-    local self = setmetatable({}, Gang)
-    self.name = name
-    self.label = label
-    self.grades = {}
-    self.boss = {x = 0.0, y = 0.0, z = 0.0}
-    self.coffre = {x = 0.0, y = 0.0, z = 0.0}
-    return self
-end
+Config.AdminAce = 'gangbuilder.admin'
 
+Config.MarkerDrawDistance = 10.0
+Config.BossInteractDistance = 2.0
+Config.CoffreInteractDistance = 1.5
+Config.PlayerInteractDistance = 3.0
+Config.VehicleInteractDistance = 5.0
 
-function Gang:setBossPos(coords)
-    self.boss = coords
-end
+Config.StashSlots = 40
+Config.StashWeight = 100000
 
-function Gang:getData()
-    return {
-        name = self.name,
-        label = self.label,
-        grades = self.grades,
-        boss = self.boss,
-        coffre = self.coffre
-    }
-end
+Config.MaxTransaction = 10000000
+Config.MaxGradeLevel = 99
+Config.MaxNameLength = 20
+Config.MaxLabelLength = 32
 
+Config.BossGradeName = 'boss'
+Config.UnemployedJob = 'unemployed'
 
-function Gang:setCoffre(coords)
-    self.coffre = coords
-end
-
-function Gang:addGrade(name, label, level)
-    table.insert(self.grades, {
-        name = name,
-        label = label,
-        level = tonumber(level) or 0
-    })
-end
-
-
-
+Config.Debug = false
